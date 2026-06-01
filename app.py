@@ -42,61 +42,28 @@ def format_inr(amount):
         return f"{sign}₹{formatted}.{paise:02d}"
     return f"{sign}₹{formatted}"
 
-# ==================== CSS FIXES ====================
-st.markdown("""
-<style>
-/* Fix for metrics display */
-div[data-testid="column"] {
-    min-width: 0 !important;
-    flex: 1 !important;
-}
-
-.stMetric {
-    background-color: #f0f2f6;
-    border-radius: 12px;
-    padding: 15px 10px;
-    text-align: center;
-    margin: 5px;
-}
-
-.stMetric label {
-    font-size: 14px !important;
-    font-weight: 500 !important;
-}
-
-.stMetric .metric-value {
-    font-size: 28px !important;
-    font-weight: bold !important;
-}
-
-/* Fix sidebar */
-.stSidebar {
-    min-width: 280px !important;
-    max-width: 350px !important;
-}
-
-/* Main content spacing */
-.main .block-container {
-    padding-top: 1rem !important;
-    padding-left: 1rem !important;
-    padding-right: 1rem !important;
-}
-
-/* Hide footer */
-footer {visibility: hidden;}
-
-/* Make tabs look better */
-.stTabs [data-baseweb="tab-list"] {
-    gap: 8px;
-    background-color: transparent;
-}
-
-.stTabs [data-baseweb="tab"] {
-    padding: 8px 16px;
-    border-radius: 8px;
-}
-</style>
-""", unsafe_allow_html=True)
+# ==================== THEME HANDLER ====================
+def apply_theme():
+    theme = st.session_state.get('theme', 'light')
+    if theme == 'dark':
+        st.markdown("""
+        <script>
+        document.body.classList.add('dark');
+        document.documentElement.setAttribute('data-theme', 'dark');
+        </script>
+        <style>
+        .stApp {
+            background-color: #0e1117 !important;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown("""
+        <script>
+        document.body.classList.remove('dark');
+        document.documentElement.setAttribute('data-theme', 'light');
+        </script>
+        """, unsafe_allow_html=True)
 
 # ==================== USER MANAGEMENT ====================
 
