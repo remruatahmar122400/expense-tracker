@@ -1,23 +1,102 @@
-# app.py - Multi-User Expense Tracker with Indian Rupees (₹)
-# PRIVATE - Usernames are NOT visible to others
+# app.py - Complete Expense Tracker with Fixed Dashboard
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from datetime import datetime
+import plotly.graph_objects as go
+from datetime import datetime, timedelta
 import json
 import os
 import hashlib
 
-# Page configuration
+# Page configuration - MUST be first
 st.set_page_config(
     page_title="Expense Tracker - India",
     page_icon="🇮🇳",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# Title
-st.title("🇮🇳 Personal Expense Tracker (₹)")
-st.markdown("---")
+# ==================== CURRENCY FORMATTER ====================
+def format_inr(amount):
+    if amount is None:
+        return "₹0"
+    sign = "-" if amount < 0 else ""
+    amount_abs = abs(amount)
+    rupees = int(amount_abs)
+    paise = int(round((amount_abs - rupees) * 100))
+    
+    s = str(rupees)
+    if len(s) > 3:
+        last_three = s[-3:]
+        remaining = s[:-3]
+        if remaining:
+            formatted = remaining[::-1]
+            formatted = ','.join(formatted[i:i+2] for i in range(0, len(formatted), 2))
+            formatted = formatted[::-1] + ',' + last_three
+        else:
+            formatted = last_three
+    else:
+        formatted = s
+    
+    if paise > 0:
+        return f"{sign}₹{formatted}.{paise:02d}"
+    return f"{sign}₹{formatted}"
+
+# ==================== CSS FIXES ====================
+st.markdown("""
+<style>
+/* Fix for metrics display */
+div[data-testid="column"] {
+    min-width: 0 !important;
+    flex: 1 !important;
+}
+
+.stMetric {
+    background-color: #f0f2f6;
+    border-radius: 12px;
+    padding: 15px 10px;
+    text-align: center;
+    margin: 5px;
+}
+
+.stMetric label {
+    font-size: 14px !important;
+    font-weight: 500 !important;
+}
+
+.stMetric .metric-value {
+    font-size: 28px !important;
+    font-weight: bold !important;
+}
+
+/* Fix sidebar */
+.stSidebar {
+    min-width: 280px !important;
+    max-width: 350px !important;
+}
+
+/* Main content spacing */
+.main .block-container {
+    padding-top: 1rem !important;
+    padding-left: 1rem !important;
+    padding-right: 1rem !important;
+}
+
+/* Hide footer */
+footer {visibility: hidden;}
+
+/* Make tabs look better */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 8px;
+    background-color: transparent;
+}
+
+.stTabs [data-baseweb="tab"] {
+    padding: 8px 16px;
+    border-radius: 8px;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # ==================== USER MANAGEMENT ====================
 
@@ -36,251 +115,415 @@ def save_all_users_data(data):
     with open(USERS_FILE, 'w') as f:
         json.dump(data, f, indent=2)
 
-def format_inr(amount):
-    sign = "-" if amount < 0 else ""
-    amount_abs = abs(amount)
-    rupees = int(amount_abs)
-    paise = int(round((amount_abs - rupees) * 100))
-    rupees_str = f"{rupees:,}"
-    parts = rupees_str.split(',')
-    if len(parts) > 1:
-        last = parts[-1]
-        middle = parts[-2] if len(parts) >= 2 else ""
-        first = ','.join(parts[:-2]) if len(parts) > 2 else ""
-        if first:
-            rupees_str = f"{first},{middle},{last}"
-        elif middle:
-            rupees_str = f"{middle},{last}"
-        else:
-            rupees_str = last
-    if paise > 0:
-        return f"{sign}₹{rupees_str}.{paise:02d}"
-    return f"{sign}₹{rupees_str}"
+def save_current_user_data():
+    if not st.session_state.current_user:
+        return
+    all_users = load_all_users_data()
+    user_data = all_users.get(st.session_state.current_user, {})
+    user_data["transactions"] = st.session_state.user_transactions
+    user_data["tasks"] = st.session_state.user_tasks
+    user_data["wallets"] = st.session_state.user_wallets
+    all_users[st.session_state.current_user] = user_data
+    save_all_users_data(all_users)
+
+def update_wallet_balances():
+    cash_balance = 0
+    online_balance = 0
+    for t in st.session_state.user_transactions:
+        if t.get("wallet") == "Cash":
+            cash_balance += t["amount"]
+        elif t.get("wallet") == "Online Payment":
+            online_balance += t["amount"]
+    st.session_state.user_wallets["Cash"] = cash_balance
+    st.session_state.user_wallets["Online Payment"] = online_balance
 
 # Initialize session state
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
+if 'current_user' not in st.session_state:
     st.session_state.current_user = None
+if 'user_transactions' not in st.session_state:
     st.session_state.user_transactions = []
+if 'user_tasks' not in st.session_state:
+    st.session_state.user_tasks = []
+if 'user_wallets' not in st.session_state:
+    st.session_state.user_wallets = {"Cash": 0, "Online Payment": 0}
 
-# ==================== LOGIN / SIGNUP PAGE (PRIVATE - No dropdown!) ====================
+# Restore login state
+if not st.session_state.logged_in:
+    saved_user = st.query_params.get("user", [None])[0]
+    if saved_user:
+        all_users = load_all_users_data()
+        if saved_user in all_users:
+            st.session_state.logged_in = True
+            st.session_state.current_user = saved_user
+            st.session_state.user_transactions = all_users[saved_user].get("transactions", [])
+            st.session_state.user_tasks = all_users[saved_user].get("tasks", [])
+            st.session_state.user_wallets = all_users[saved_user].get("wallets", {"Cash": 0, "Online Payment": 0})
+            update_wallet_balances()
+
+# ==================== LOGIN PAGE ====================
 
 if not st.session_state.logged_in:
-    st.subheader("🔐 Welcome to Expense Tracker (₹)")
+    st.title("🇮🇳 Personal Expense Tracker")
     
-    tab1, tab2 = st.tabs(["Login", "Create New Account"])
-    
-    with tab1:
-        st.markdown("### Login with your passcode")
-        
-        # 🔒 FIX: Use text input instead of dropdown - no one can see other usernames!
-        username = st.text_input("Enter your username", placeholder="Type your username here")
-        passcode = st.text_input("Enter your passcode", type="password")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("### 🔐 Login")
+        username = st.text_input("Username", placeholder="Enter your username")
+        passcode = st.text_input("Passcode", type="password", placeholder="Enter your passcode")
         
         if st.button("Login", use_container_width=True):
             if username and passcode:
                 all_users = load_all_users_data()
-                
                 if username in all_users:
-                    stored_hash = all_users[username].get("passcode_hash")
-                    if stored_hash == hash_passcode(passcode):
+                    if all_users[username].get("passcode_hash") == hash_passcode(passcode):
                         st.session_state.logged_in = True
                         st.session_state.current_user = username
                         st.session_state.user_transactions = all_users[username].get("transactions", [])
-                        st.success(f"Welcome back, {username}! 🎉")
+                        st.session_state.user_tasks = all_users[username].get("tasks", [])
+                        st.session_state.user_wallets = all_users[username].get("wallets", {"Cash": 0, "Online Payment": 0})
+                        update_wallet_balances()
+                        st.query_params["user"] = username
                         st.rerun()
                     else:
                         st.error("❌ Wrong passcode!")
                 else:
-                    st.error(f"❌ Username '{username}' not found. Please create an account first.")
-            else:
-                st.error("Please enter both username and passcode")
+                    st.error("Username not found!")
     
-    with tab2:
-        st.markdown("### Create a new account")
-        st.info("🔒 Your username is private. No one else can see it when logging in.")
+    with col2:
+        st.markdown("### 📝 Create Account")
+        new_username = st.text_input("Choose a username", key="new_user")
+        new_passcode = st.text_input("Choose a passcode (4+ chars)", type="password", key="new_pass")
+        confirm_passcode = st.text_input("Confirm passcode", type="password", key="confirm_pass")
         
-        new_username = st.text_input("Choose a username", placeholder="e.g., Raj123")
-        new_passcode = st.text_input("Choose a passcode (4-8 digits)", type="password")
-        confirm_passcode = st.text_input("Confirm passcode", type="password")
-        
-        if st.button("Create Account", use_container_width=True):
+        if st.button("Create Account", use_container_width=True, key="create_btn"):
             all_users = load_all_users_data()
-            
             if not new_username:
-                st.error("Please enter a username!")
+                st.error("Enter username!")
             elif new_username in all_users:
-                st.error("Username already exists! Please choose another.")
+                st.error("Username exists!")
             elif len(new_passcode) < 4:
-                st.error("Passcode must be at least 4 characters!")
+                st.error("Passcode too short!")
             elif new_passcode != confirm_passcode:
                 st.error("Passcodes don't match!")
             else:
                 all_users[new_username] = {
                     "passcode_hash": hash_passcode(new_passcode),
                     "transactions": [],
+                    "tasks": [],
+                    "wallets": {"Cash": 0, "Online Payment": 0},
                     "created_at": datetime.now().isoformat()
                 }
                 save_all_users_data(all_users)
-                st.success("✅ Account created! Now go to the Login tab to sign in.")
+                st.success("✅ Account created! Now login.")
                 st.balloons()
-    
     st.stop()
 
-# ==================== LOGGED IN USER INTERFACE ====================
+# Update wallet balances
+update_wallet_balances()
 
-# (Keep ALL the rest of your existing code exactly the same from here)
-# The sidebar, transaction adding, charts, etc. remain unchanged
-
+# ==================== SIDEBAR ====================
 with st.sidebar:
-    st.markdown(f"### 👤 Logged in as: **{st.session_state.current_user}**")
+    st.markdown(f"### 👤 {st.session_state.current_user}")
     
     if st.button("🚪 Logout", use_container_width=True):
-        all_users = load_all_users_data()
-        all_users[st.session_state.current_user]["transactions"] = st.session_state.user_transactions
-        save_all_users_data(all_users)
-        
+        save_current_user_data()
         st.session_state.logged_in = False
         st.session_state.current_user = None
         st.session_state.user_transactions = []
+        st.session_state.user_tasks = []
+        st.session_state.user_wallets = {"Cash": 0, "Online Payment": 0}
+        st.query_params.clear()
         st.rerun()
     
     st.markdown("---")
-    st.header("➕ Add New Transaction")
-    st.caption("Minimum amount: ₹1")
+    
+    # Wallets
+    st.markdown("### 💰 Wallets")
+    col_w1, col_w2 = st.columns(2)
+    with col_w1:
+        st.metric("💵 Cash", format_inr(st.session_state.user_wallets["Cash"]))
+    with col_w2:
+        st.metric("📱 Online", format_inr(st.session_state.user_wallets["Online Payment"]))
+    
+    # Transfer
+    with st.expander("🔄 Transfer between wallets"):
+        transfer_amount = st.number_input("Amount (₹)", min_value=1.0, step=10.0, key="transfer_amt")
+        from_wallet = st.selectbox("From", ["Cash", "Online Payment"])
+        to_wallet = st.selectbox("To", ["Cash", "Online Payment"])
+        
+        if st.button("Transfer", use_container_width=True):
+            if from_wallet != to_wallet:
+                if transfer_amount <= st.session_state.user_wallets[from_wallet]:
+                    st.session_state.user_transactions.append({
+                        "description": f"Transfer from {from_wallet} to {to_wallet}",
+                        "amount": -transfer_amount,
+                        "category": "Transfer",
+                        "subcategory": "Wallet Transfer",
+                        "wallet": from_wallet,
+                        "date": str(datetime.now().date()),
+                        "type": "Expense",
+                        "timestamp": datetime.now().isoformat()
+                    })
+                    st.session_state.user_transactions.append({
+                        "description": f"Transfer from {from_wallet} to {to_wallet}",
+                        "amount": transfer_amount,
+                        "category": "Transfer",
+                        "subcategory": "Wallet Transfer",
+                        "wallet": to_wallet,
+                        "date": str(datetime.now().date()),
+                        "type": "Income",
+                        "timestamp": datetime.now().isoformat()
+                    })
+                    update_wallet_balances()
+                    save_current_user_data()
+                    st.success(f"Transferred ₹{transfer_amount:,.2f}")
+                    st.rerun()
+                else:
+                    st.error(f"Insufficient balance!")
+            else:
+                st.error("Select different wallets!")
+    
+    st.markdown("---")
+    
+    # Add Transaction
+    st.header("➕ Add Transaction")
     
     description = st.text_input("Description", placeholder="e.g., Groceries, Salary...")
     amount = st.number_input("Amount (₹)", min_value=1.0, step=1.0, format="%.2f")
     transaction_type = st.radio("Type", ["Expense 💸", "Income 💰"])
     
-    expense_categories = [
-        "Food & Dining 🍛", "Transport 🚗", "Entertainment 🎬", "Bills 💡",
-        "Shopping 🛍️", "Health 🏥", "Groceries 🛒", "Rent 🏠",
-        "Education 📚", "EMI/Loan 💳", "Recharge/OTT 📱", "Other"
-    ]
-    
-    income_categories = ["Salary 💼", "Freelance 💻", "Gift 🎁", "Investment 📈", "Business 🏪", "Refund 🔄", "Other"]
+    expense_cats = ["Food 🍛", "Transport 🚗", "Bills 💡", "Shopping 🛍️", "Rent 🏠", "Other"]
+    income_cats = ["Salary 💼", "Freelance 💻", "Investment 📈", "Gift 🎁", "Other"]
     
     if transaction_type == "Expense 💸":
-        category = st.selectbox("Category", expense_categories)
+        category = st.selectbox("Category", expense_cats)
+        wallet = st.selectbox("Paid from", ["Cash", "Online Payment"])
     else:
-        category = st.selectbox("Category", income_categories)
+        category = st.selectbox("Category", income_cats)
+        wallet = st.selectbox("Received in", ["Cash", "Online Payment"])
     
     date = st.date_input("Date", datetime.now())
     
     if st.button("✅ Add Transaction", use_container_width=True):
         if description:
             amount_value = -amount if transaction_type == "Expense 💸" else amount
-            
-            new_transaction = {
+            st.session_state.user_transactions.append({
                 "description": description,
                 "amount": amount_value,
                 "category": category,
+                "subcategory": "",
+                "wallet": wallet,
                 "date": str(date),
                 "type": transaction_type,
                 "timestamp": datetime.now().isoformat()
-            }
-            
-            st.session_state.user_transactions.append(new_transaction)
-            all_users = load_all_users_data()
-            all_users[st.session_state.current_user]["transactions"] = st.session_state.user_transactions
-            save_all_users_data(all_users)
-            
-            st.success(f"✅ Transaction added! {format_inr(amount_value)}")
+            })
+            update_wallet_balances()
+            save_current_user_data()
+            st.success(f"Added! {format_inr(amount_value)}")
             st.rerun()
         else:
-            st.error("Please enter a description!")
-
-# ==================== MAIN CONTENT ====================
-
-if st.session_state.user_transactions:
-    df = pd.DataFrame(st.session_state.user_transactions)
-    df['amount'] = df['amount'].astype(float)
-    df['date'] = pd.to_datetime(df['date'])
-    
-    st.subheader("📊 Financial Overview")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    
-    income = df[df["amount"] > 0]["amount"].sum()
-    expense = abs(df[df["amount"] < 0]["amount"].sum())
-    balance = income - expense
-    
-    col1.metric("💰 Total Income", format_inr(income))
-    col2.metric("💸 Total Expense", format_inr(expense))
-    col3.metric("📊 Balance", format_inr(balance))
-    col4.metric("📝 Transactions", len(df))
+            st.error("Enter description!")
     
     st.markdown("---")
     
-    col_chart1, col_chart2 = st.columns(2)
+    # Tasks
+    st.subheader("📝 Tasks")
+    task_desc = st.text_input("Task", placeholder="e.g., Pay bill", key="task_desc")
+    task_due = st.date_input("Due Date", datetime.now(), key="task_due")
     
-    with col_chart1:
-        st.subheader("📈 Monthly Trend")
-        df['month'] = df['date'].dt.strftime('%B %Y')
-        monthly = df.groupby('month')['amount'].sum().reset_index()
-        if not monthly.empty:
-            fig = px.bar(monthly, x='month', y='amount', 
-                        title="Income vs Expense Over Time",
-                        labels={'amount': 'Amount (₹)', 'month': 'Month'})
-            fig.update_layout(xaxis_tickangle=-45)
-            st.plotly_chart(fig, use_container_width=True)
-    
-    with col_chart2:
-        st.subheader("🥧 Expense Breakdown")
-        expense_df = df[df["amount"] < 0].copy()
-        if not expense_df.empty:
-            expense_df['amount'] = expense_df['amount'].abs()
-            fig = px.pie(expense_df, values='amount', names='category', 
-                        title="Spending by Category", hole=0.3)
-            st.plotly_chart(fig, use_container_width=True)
-    
-    st.subheader("📋 All Transactions")
-    display_df = df.copy()
-    display_df['amount_display'] = display_df['amount'].apply(format_inr)
-    display_df['date'] = display_df['date'].dt.strftime('%d-%m-%Y')
-    
-    st.dataframe(
-        display_df[['date', 'description', 'category', 'amount_display']],
-        use_container_width=True,
-        hide_index=True
-    )
-    
-    st.subheader("🗑️ Manage Transactions")
-    
-    col_del1, col_del2 = st.columns(2)
-    with col_del1:
-        if st.button("🗑️ Delete All My Transactions", type="secondary"):
-            st.session_state.user_transactions = []
-            all_users = load_all_users_data()
-            all_users[st.session_state.current_user]["transactions"] = []
-            save_all_users_data(all_users)
-            st.warning("All your transactions deleted!")
+    if st.button("➕ Add Task", use_container_width=True):
+        if task_desc:
+            st.session_state.user_tasks.append({
+                "description": task_desc,
+                "due_date": str(task_due),
+                "done": False,
+                "created_at": datetime.now().isoformat()
+            })
+            save_current_user_data()
+            st.success("Task added!")
             st.rerun()
     
-    with col_del2:
-        if st.button("↩️ Delete Last Transaction"):
-            if st.session_state.user_transactions:
-                st.session_state.user_transactions.pop()
-                all_users = load_all_users_data()
-                all_users[st.session_state.current_user]["transactions"] = st.session_state.user_transactions
-                save_all_users_data(all_users)
-                st.success("Last transaction deleted!")
-                st.rerun()
-            else:
-                st.warning("No transactions to delete!")
+    if st.session_state.user_tasks:
+        for idx, task in enumerate(st.session_state.user_tasks):
+            if not task.get("done", False):
+                if st.checkbox(f"✅ {task['description']} (due {task['due_date']})", key=f"task_{idx}"):
+                    st.session_state.user_tasks[idx]["done"] = True
+                    save_current_user_data()
+                    st.rerun()
 
-else:
-    st.info("📭 No transactions yet! Use the sidebar to add your first transaction.")
-    
-    with st.expander("ℹ️ How this works"):
-        st.markdown(f"""
-        **Welcome {st.session_state.current_user}!**
+# ==================== MAIN CONTENT - FIXED DASHBOARD ====================
+
+st.title(f"💰 {st.session_state.current_user}'s Expense Tracker")
+
+# Create tabs
+tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "📋 Transactions", "📝 Tasks", "📈 Analytics"])
+
+# ========== TAB 1: DASHBOARD (FIXED) ==========
+with tab1:
+    if st.session_state.user_transactions:
+        df = pd.DataFrame(st.session_state.user_transactions)
+        df['amount'] = df['amount'].astype(float)
+        df['date'] = pd.to_datetime(df['date'])
         
-        - Add transactions using the sidebar
-        - **Minimum transaction amount is ₹1**
-        - Your data is **private** - only you can access it
-        """)
+        # Current month filter
+        current_month = datetime.now().month
+        current_year = datetime.now().year
+        df_current = df[(df['date'].dt.month == current_month) & (df['date'].dt.year == current_year)]
+        
+        # Calculate values safely
+        if not df_current.empty:
+            income_val = df_current[df_current["amount"] > 0]["amount"].sum() if len(df_current[df_current["amount"] > 0]) > 0 else 0
+            expense_val = abs(df_current[df_current["amount"] < 0]["amount"].sum()) if len(df_current[df_current["amount"] < 0]) > 0 else 0
+            balance_val = income_val - expense_val
+            txn_count = len(df_current)
+        else:
+            income_val = 0
+            expense_val = 0
+            balance_val = 0
+            txn_count = 0
+        
+        # Month summary header
+        st.subheader(f"📊 {datetime.now().strftime('%B %Y')} Summary")
+        
+        # Metrics in 4 columns - FIXED LAYOUT
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("💰 Income", format_inr(income_val))
+        with col2:
+            st.metric("💸 Expense", format_inr(expense_val))
+        with col3:
+            st.metric("📊 Balance", format_inr(balance_val))
+        with col4:
+            st.metric("📝 Transactions", txn_count)
+        
+        st.markdown("---")
+        
+        # Wallet balances
+        st.subheader("💰 Wallet Balances")
+        col_w1, col_w2, col_w3 = st.columns(3)
+        with col_w1:
+            st.metric("💵 Cash", format_inr(st.session_state.user_wallets["Cash"]))
+        with col_w2:
+            st.metric("📱 Online", format_inr(st.session_state.user_wallets["Online Payment"]))
+        with col_w3:
+            st.metric("💳 Total", format_inr(st.session_state.user_wallets["Cash"] + st.session_state.user_wallets["Online Payment"]))
+        
+        st.markdown("---")
+        
+        # Recent Transactions
+        st.subheader("📋 Recent Transactions")
+        recent_df = df.sort_values('date', ascending=False).head(10)
+        if not recent_df.empty:
+            recent_df['amount_display'] = recent_df['amount'].apply(format_inr)
+            recent_df['date'] = recent_df['date'].dt.strftime('%d-%m-%Y')
+            
+            st.dataframe(
+                recent_df[['date', 'description', 'category', 'wallet', 'amount_display']],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "date": "Date",
+                    "description": "Description",
+                    "category": "Category",
+                    "wallet": "Wallet",
+                    "amount_display": "Amount"
+                }
+            )
+        else:
+            st.info("No transactions yet")
+    else:
+        st.info("📭 No transactions yet. Add your first transaction in the sidebar!")
 
+# ========== TAB 2: TRANSACTIONS ==========
+with tab2:
+    if st.session_state.user_transactions:
+        df = pd.DataFrame(st.session_state.user_transactions)
+        df['amount'] = df['amount'].astype(float)
+        df['date'] = pd.to_datetime(df['date'])
+        df['amount_display'] = df['amount'].apply(format_inr)
+        df['date'] = df['date'].dt.strftime('%d-%m-%Y')
+        
+        st.dataframe(
+            df[['date', 'description', 'category', 'wallet', 'amount_display']],
+            use_container_width=True,
+            hide_index=True
+        )
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🗑️ Delete All", type="secondary"):
+                st.session_state.user_transactions = []
+                update_wallet_balances()
+                save_current_user_data()
+                st.rerun()
+        with col2:
+            if st.button("↩️ Delete Last", type="secondary"):
+                if st.session_state.user_transactions:
+                    st.session_state.user_transactions.pop()
+                    update_wallet_balances()
+                    save_current_user_data()
+                    st.rerun()
+    else:
+        st.info("No transactions yet")
+
+# ========== TAB 3: TASKS ==========
+with tab3:
+    if st.session_state.user_tasks:
+        pending = [t for t in st.session_state.user_tasks if not t.get("done", False)]
+        completed = [t for t in st.session_state.user_tasks if t.get("done", False)]
+        
+        if pending:
+            st.subheader("⏳ Pending Tasks")
+            for idx, task in enumerate(st.session_state.user_tasks):
+                if not task.get("done", False):
+                    if st.checkbox(f"✅ {task['description']} (due {task['due_date']})", key=f"main_task_{idx}"):
+                        st.session_state.user_tasks[idx]["done"] = True
+                        save_current_user_data()
+                        st.rerun()
+        else:
+            st.success("🎉 No pending tasks!")
+        
+        if completed:
+            with st.expander(f"✅ Completed ({len(completed)})"):
+                for task in completed:
+                    st.write(f"~~{task['description']}~~")
+    else:
+        st.info("No tasks yet")
+
+# ========== TAB 4: ANALYTICS ==========
+with tab4:
+    if st.session_state.user_transactions:
+        df = pd.DataFrame(st.session_state.user_transactions)
+        df['amount'] = df['amount'].astype(float)
+        df['date'] = pd.to_datetime(df['date'])
+        
+        # Monthly chart
+        st.subheader("📈 Monthly Trend")
+        df['month'] = df['date'].dt.strftime('%b %Y')
+        monthly_income = df[df['amount'] > 0].groupby('month')['amount'].sum()
+        monthly_expense = abs(df[df['amount'] < 0].groupby('month')['amount'].sum())
+        
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=monthly_income.index, y=monthly_income.values, name='Income', marker_color='#00cc66'))
+        fig.add_trace(go.Bar(x=monthly_expense.index, y=monthly_expense.values, name='Expense', marker_color='#ff4444'))
+        fig.update_layout(barmode='group', height=400)
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Expense pie chart
+        st.subheader("🥧 Expense by Category")
+        expense_df = df[df['amount'] < 0].copy()
+        if not expense_df.empty:
+            expense_df['amount'] = expense_df['amount'].abs()
+            category_expense = expense_df.groupby('category')['amount'].sum().reset_index()
+            fig = px.pie(category_expense, values='amount', names='category', hole=0.3)
+            fig.update_layout(height=400)
+            st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Add transactions to see analytics!")
+
+# Footer
 st.markdown("---")
-st.caption(f"🇮🇳 Logged in as {st.session_state.current_user} | ₹ Indian Rupees | Your data is private")
+st.caption(f"🇮🇳 {st.session_state.current_user} | 💵 {format_inr(st.session_state.user_wallets['Cash'])} | 📱 {format_inr(st.session_state.user_wallets['Online Payment'])}")
